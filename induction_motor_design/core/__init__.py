@@ -15,6 +15,17 @@ from .design_engine import (
     design_motor
 )
 
+from .genetic_optimizer import (
+    GeneticOptimizer,
+    GradientDescentOptimizer,
+    DesignGenes,
+    DesignFitness,
+    Individual,
+    optimize_motor_genetic,
+    optimize_motor_gradient_descent,
+    hybrid_optimize_motor
+)
+
 __all__ = [
     # Convergence
     'ConvergenceState',
@@ -27,5 +38,15 @@ __all__ = [
     'DesignInputs',
     'DesignOutputs',
     'InductionMotorDesigner',
-    'design_motor'
+    'design_motor',
+    
+    # Genetic optimizer
+    'GeneticOptimizer',
+    'GradientDescentOptimizer',
+    'DesignGenes',
+    'DesignFitness',
+    'Individual',
+    'optimize_motor_genetic',
+    'optimize_motor_gradient_descent',
+    'hybrid_optimize_motor'
 ]

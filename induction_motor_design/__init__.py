@@ -70,7 +70,15 @@ from .core import (
     InductionMotorDesigner,
     design_motor,
     ConvergenceTracker,
-    DesignHistory
+    DesignHistory,
+    GeneticOptimizer,
+    GradientDescentOptimizer,
+    DesignGenes,
+    DesignFitness,
+    Individual,
+    optimize_motor_genetic,
+    optimize_motor_gradient_descent,
+    hybrid_optimize_motor
 )
 
 from .utils import (
@@ -87,6 +95,14 @@ __all__ = [
     'InductionMotorDesigner',
     'DesignInputs',
     'DesignOutputs',
+    'GeneticOptimizer',
+    'GradientDescentOptimizer',
+    'DesignGenes',
+    'DesignFitness',
+    'Individual',
+    'optimize_motor_genetic',
+    'optimize_motor_gradient_descent',
+    'hybrid_optimize_motor',
     
     # Models
     'NameplateData',
