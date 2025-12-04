@@ -180,6 +180,20 @@ class WindingDesign:
         copper_per_slot = self.config.conductors_per_slot * self.total_conductor_area
         return copper_per_slot / self.fill_factor
     
+    def end_turn_length_effective(self, D_bore: float) -> float:
+        """
+        Effective one-side end turn length [m].
+        
+        Uses stored value if provided, otherwise estimates from geometry.
+        """
+        if self.end_turn_length is not None:
+            return self.end_turn_length
+        
+        pole_pitch = math.pi * D_bore / (2 * self.config.pole_pairs)
+        full_pitch = self.config.N_slots / (2 * self.config.pole_pairs)
+        coil_pitch_ratio = self.config.coil_pitch_slots / full_pitch
+        return 0.5 * pole_pitch * coil_pitch_ratio + 0.02  # add 20 mm overhang
+    
     def phase_resistance(
         self, 
         stack_length: float, 
@@ -201,19 +215,10 @@ class WindingDesign:
         Returns:
             Phase resistance [Ω]
         """
-        # Estimate end turn length if not provided
-        if self.end_turn_length is None:
-            if D_bore is None:
-                raise ValueError("Need D_bore to estimate end turn length")
-            # Empirical: L_end ≈ coil_span + some overhang
-            pole_pitch = math.pi * D_bore / (2 * self.config.pole_pairs)
-            coil_pitch_ratio = self.config.coil_pitch_slots / (
-                self.config.N_slots / (2 * self.config.pole_pairs)
-            )
-            # End turn length per coil side (one direction)
-            end_turn = 0.5 * pole_pitch * coil_pitch_ratio + 0.02  # + 20mm overhang
-        else:
-            end_turn = self.end_turn_length
+        if D_bore is None and self.end_turn_length is None:
+            raise ValueError("Need D_bore to estimate end turn length")
+        
+        end_turn = self.end_turn_length_effective(D_bore if D_bore is not None else 0.0)
         
         # Length of one conductor (in slot + 2 end turns)
         length_per_conductor = stack_length + 2 * end_turn

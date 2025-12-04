@@ -81,6 +81,8 @@ from .core import (
     hybrid_optimize_motor
 )
 
+from .core.thermal_model import InsulationClass
+
 from .utils import (
     MU_0,
     DesignRanges
@@ -103,6 +105,7 @@ __all__ = [
     'optimize_motor_genetic',
     'optimize_motor_gradient_descent',
     'hybrid_optimize_motor',
+    'InsulationClass',
     
     # Models
     'NameplateData',

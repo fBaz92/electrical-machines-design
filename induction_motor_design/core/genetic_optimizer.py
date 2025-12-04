@@ -41,6 +41,12 @@ from ..calculations.equivalent_circuit import (
 )
 from ..utils.constants import DesignRanges, MU_0
 from .convergence import DesignIteration
+from .thermal_model import (
+    MotorLosses,
+    evaluate_design_thermal_performance,
+    ThermalModelResult,
+    InsulationClass
+)
 
 
 @dataclass
@@ -148,10 +154,11 @@ class DesignFitness:
     # Specification shortfalls (only penalize when below target)
     efficiency_shortfall_penalty: float
     power_factor_shortfall_penalty: float
+    thermal_penalty: float = 0.0
     
     # Additional metrics
-    total_losses: float        # Total losses [W]
-    cost_estimate: float       # Rough cost metric (copper + iron mass)
+    total_losses: float = 0.0       # Total losses [W]
+    cost_estimate: float = 0.0      # Rough cost metric (copper + iron mass)
     
     @property
     def total_fitness(self) -> float:
@@ -184,10 +191,12 @@ class DesignFitness:
             100.0 * self.convergence_penalty
         )
         
+        thermal = 35.0 * self.thermal_penalty
+        
         # Soft objectives (low weight)
         soft = 0.001 * self.total_losses + 0.0001 * self.cost_estimate
         
-        return target_error + spec_shortfalls + constraints + soft
+        return target_error + spec_shortfalls + constraints + thermal + soft
     
     @property
     def is_valid(self) -> bool:
@@ -200,7 +209,8 @@ class DesignFitness:
                 self.torque_error < 0.1 and
                 self.efficiency_error < 0.1 and
                 self.power_factor_error < 0.1 and
-                self.speed_error < 0.1)
+                self.speed_error < 0.1 and
+                self.thermal_penalty == 0.0)
     
     @property
     def max_error(self) -> float:
@@ -227,6 +237,7 @@ class Individual:
     circuit: Optional[CircuitParameters] = None
     converged: bool = False
     final_state: Optional[Dict[str, Any]] = None
+    thermal_result: Optional[ThermalModelResult] = None
     
     def __lt__(self, other: 'Individual') -> bool:
         """For sorting by fitness."""
@@ -253,6 +264,10 @@ class GeneticOptimizer:
         mutation_rate: float = 0.15,
         crossover_rate: float = 0.7,
         elitism_count: int = 5,
+        enable_thermal_model: bool = False,
+        insulation_class: InsulationClass = InsulationClass.F,
+        thermal_ambient: float = 40.0,
+        cooling_type: str = "TEFC",
         random_injection_rate: float = 0.1,
         verbose: bool = True
     ):
@@ -269,6 +284,10 @@ class GeneticOptimizer:
             mutation_rate: Probability of gene mutation
             crossover_rate: Probability of crossover
             elitism_count: Number of best individuals to preserve
+            enable_thermal_model: Enable thermal evaluation/penalties
+            insulation_class: Winding insulation class for thermal checks
+            thermal_ambient: Ambient temperature for thermal model
+            cooling_type: Cooling type identifier for thermal model
             random_injection_rate: Fraction of population replaced by random
                 individuals each generation (improves exploration)
             verbose: Print progress
@@ -285,6 +304,10 @@ class GeneticOptimizer:
         self.elitism_count = elitism_count
         self.random_injection_rate = max(0.0, min(0.5, random_injection_rate))
         self.verbose = verbose
+        self.enable_thermal_model = enable_thermal_model
+        self.insulation_class = insulation_class
+        self.thermal_ambient = thermal_ambient
+        self.cooling_type = cooling_type
         
         self.population: List[Individual] = []
         self.best_individual: Optional[Individual] = None
@@ -411,6 +434,7 @@ class GeneticOptimizer:
         """
         genes = individual.genes
         individual.final_state = None
+        individual.thermal_result = None
         
         try:
             # Build lamination from genes
@@ -429,6 +453,29 @@ class GeneticOptimizer:
             individual.converged = converged
             individual.final_state = final_state
             
+            thermal_result = None
+            if self.enable_thermal_model:
+                motor_losses = MotorLosses(
+                    P_cu_stator=final_state['P_cu_s'],
+                    P_cu_rotor=final_state['P_cu_r'],
+                    P_iron=final_state['P_iron'],
+                    P_mechanical=final_state['P_mech']
+                )
+                rpm = self.nameplate.rpm_sync * (1 - final_state['slip'])
+                thermal_result = evaluate_design_thermal_performance(
+                    lamination=lamination,
+                    winding=winding,
+                    stator_conductor=self.stator_conductor,
+                    rotor_conductor=self.rotor_conductor,
+                    steel=self.steel,
+                    losses=motor_losses,
+                    rpm=rpm,
+                    insulation_class=self.insulation_class,
+                    ambient_temp=self.thermal_ambient,
+                    cooling_type=self.cooling_type
+                )
+                individual.thermal_result = thermal_result
+            
             # Calculate performance at rated point
             solution = solve_circuit(
                 circuit,
@@ -445,7 +492,7 @@ class GeneticOptimizer:
             
             # Compute fitness
             fitness = self._compute_fitness(
-                perf, final_state, genes, lamination, converged
+                perf, final_state, genes, lamination, converged, thermal_result
             )
             
             return fitness
@@ -466,6 +513,7 @@ class GeneticOptimizer:
                 convergence_penalty=10.0,
                 efficiency_shortfall_penalty=10.0,
                 power_factor_shortfall_penalty=10.0,
+                thermal_penalty=10.0,
                 total_losses=1e6,
                 cost_estimate=1e6
             )
@@ -834,7 +882,8 @@ class GeneticOptimizer:
         final_state: Dict,
         genes: DesignGenes,
         lamination: LaminationAssembly,
-        converged: bool
+        converged: bool,
+        thermal_result: Optional[ThermalModelResult]
     ) -> DesignFitness:
         """Compute fitness based on performance vs targets."""
         
@@ -887,6 +936,15 @@ class GeneticOptimizer:
         # Convergence penalty
         convergence_penalty = 0.0 if converged else 1.0
         
+        thermal_penalty = 0.0
+        if self.enable_thermal_model and thermal_result is not None:
+            if not thermal_result.is_within_limits:
+                thermal_penalty = max(
+                    0.0,
+                    (thermal_result.T_winding - thermal_result.insulation_class.max_temp) /
+                    thermal_result.insulation_class.max_temp
+                )
+        
         # Total losses
         total_losses = final_state['P_cu_s'] + final_state['P_cu_r'] + final_state['P_iron'] + final_state['P_mech']
         
@@ -912,6 +970,7 @@ class GeneticOptimizer:
             convergence_penalty=convergence_penalty,
             efficiency_shortfall_penalty=efficiency_shortfall_penalty,
             power_factor_shortfall_penalty=power_factor_shortfall_penalty,
+            thermal_penalty=thermal_penalty,
             total_losses=total_losses,
             cost_estimate=cost_estimate
         )
@@ -1089,8 +1148,11 @@ class GeneticOptimizer:
             avg_fitness = sum(ind.fitness.total_fitness for ind in self.population) / len(self.population)
             best_fitness = best.fitness.total_fitness
             
+            worst_fitness = max(ind.fitness.total_fitness for ind in self.population)
+            
             self._log(f"Best fitness: {best_fitness:.4f}")
             self._log(f"Avg fitness: {avg_fitness:.4f}")
+            self._log(f"Worst fitness: {worst_fitness:.4f}")
             self._log(f"Best max error: {best.fitness.max_error:.2%}")
             self._log(f"Best valid: {best.fitness.is_valid}")
             
@@ -1099,6 +1161,7 @@ class GeneticOptimizer:
                 'generation': generation + 1,
                 'best_fitness': best_fitness,
                 'avg_fitness': avg_fitness,
+                 'worst_fitness': worst_fitness,
                 'best_max_error': best.fitness.max_error,
                 'best_valid': best.fitness.is_valid
             })
@@ -1194,7 +1257,13 @@ class GradientDescentOptimizer:
         gradient_epsilon: float = 1e-3,
         max_iterations: int = 40,
         tolerance: float = 1e-4,
-        verbose: bool = True
+        improvement_tolerance: float = 1e-5,
+        patience: int = 10,
+        verbose: bool = True,
+        enable_thermal_model: bool = False,
+        insulation_class: InsulationClass = InsulationClass.F,
+        thermal_ambient: float = 40.0,
+        cooling_type: str = "TEFC"
     ):
         self.nameplate = nameplate
         self.steel = steel
@@ -1204,7 +1273,13 @@ class GradientDescentOptimizer:
         self.gradient_epsilon = gradient_epsilon
         self.max_iterations = max_iterations
         self.tolerance = tolerance
+        self.improvement_tolerance = improvement_tolerance
+        self.patience = max(1, patience)
         self.verbose = verbose
+        self.enable_thermal_model = enable_thermal_model
+        self.insulation_class = insulation_class
+        self.thermal_ambient = thermal_ambient
+        self.cooling_type = cooling_type
         
         from ..calculations.preliminary import calculate_preliminary_dimensions
         self.preliminary = calculate_preliminary_dimensions(self.nameplate)
@@ -1217,6 +1292,10 @@ class GradientDescentOptimizer:
             rotor_conductor=self.rotor_conductor,
             population_size=1,
             n_generations=1,
+            enable_thermal_model=enable_thermal_model,
+            insulation_class=insulation_class,
+            thermal_ambient=thermal_ambient,
+            cooling_type=cooling_type,
             verbose=False
         )
         self.evaluator.preliminary = self.preliminary
@@ -1323,13 +1402,17 @@ class GradientDescentOptimizer:
         best_individual: Optional[Individual] = None
         best_value = float('inf')
         step = self.step_size
+        no_improve_iters = 0
         
         for iteration in range(1, self.max_iterations + 1):
             value, individual, vector = self._evaluate_vector(vector)
             
-            if best_individual is None or value < best_value:
+            if best_individual is None or value < best_value - self.improvement_tolerance:
                 best_individual = individual
                 best_value = value
+                no_improve_iters = 0
+            else:
+                no_improve_iters += 1
             
             grad = self._gradient(vector, value)
             grad_norm = math.sqrt(sum(g * g for g in grad))
@@ -1367,7 +1450,15 @@ class GradientDescentOptimizer:
                 step_local *= 0.5
             
             if not updated:
-                self._log("Step size too small or no improvement; stopping.")
+                self._log("Step size too small or no improvement; reducing step and perturbing search direction.")
+                step *= 0.5
+                jittered = []
+                for val in vector:
+                    scale = 0.02 * max(1.0, abs(val))
+                    jittered.append(val + random.gauss(0.0, scale))
+                vector = self._project_vector(jittered)
+            if no_improve_iters >= self.patience:
+                self._log(f"No improvement for {self.patience} iterations; stopping.")
                 break
         
         if best_individual is None:
@@ -1390,6 +1481,10 @@ def optimize_motor_genetic(
     stator_conductor: ConductorMaterial = COPPER,
     rotor_conductor: ConductorMaterial = ALUMINUM,
     verbose: bool = True,
+    enable_thermal_model: bool = False,
+    insulation_class: InsulationClass = InsulationClass.F,
+    thermal_ambient: float = 40.0,
+    cooling_type: str = "TEFC",
     **optimizer_kwargs: Any
 ) -> Tuple[Individual, GeneticOptimizer]:
     """
@@ -1431,6 +1526,10 @@ def optimize_motor_genetic(
         steel=steel,
         stator_conductor=stator_conductor,
         rotor_conductor=rotor_conductor,
+        enable_thermal_model=enable_thermal_model,
+        insulation_class=insulation_class,
+        thermal_ambient=thermal_ambient,
+        cooling_type=cooling_type,
         verbose=verbose,
         **optimizer_kwargs
     )
@@ -1452,6 +1551,10 @@ def optimize_motor_gradient_descent(
     stator_conductor: ConductorMaterial = COPPER,
     rotor_conductor: ConductorMaterial = ALUMINUM,
     verbose: bool = True,
+    enable_thermal_model: bool = False,
+    insulation_class: InsulationClass = InsulationClass.F,
+    thermal_ambient: float = 40.0,
+    cooling_type: str = "TEFC",
     initial_genes: Optional[DesignGenes] = None,
     **optimizer_kwargs: Any
 ) -> Tuple[Individual, GradientDescentOptimizer]:
@@ -1476,6 +1579,10 @@ def optimize_motor_gradient_descent(
         steel=steel,
         stator_conductor=stator_conductor,
         rotor_conductor=rotor_conductor,
+        enable_thermal_model=enable_thermal_model,
+        insulation_class=insulation_class,
+        thermal_ambient=thermal_ambient,
+        cooling_type=cooling_type,
         verbose=verbose,
         **optimizer_kwargs
     )
@@ -1495,6 +1602,10 @@ def hybrid_optimize_motor(
     steel: Optional[ElectricalSteel] = None,
     stator_conductor: ConductorMaterial = COPPER,
     rotor_conductor: ConductorMaterial = ALUMINUM,
+    enable_thermal_model: bool = False,
+    insulation_class: InsulationClass = InsulationClass.F,
+    thermal_ambient: float = 40.0,
+    cooling_type: str = "TEFC",
     top_candidates: int = 5,
     ga_kwargs: Optional[Dict[str, Any]] = None,
     gd_kwargs: Optional[Dict[str, Any]] = None,
@@ -1522,6 +1633,10 @@ def hybrid_optimize_motor(
         steel=steel,
         stator_conductor=stator_conductor,
         rotor_conductor=rotor_conductor,
+        enable_thermal_model=enable_thermal_model,
+        insulation_class=insulation_class,
+        thermal_ambient=thermal_ambient,
+        cooling_type=cooling_type,
         verbose=ga_verbose,
         **ga_kwargs
     )
@@ -1548,6 +1663,10 @@ def hybrid_optimize_motor(
             steel=steel,
             stator_conductor=stator_conductor,
             rotor_conductor=rotor_conductor,
+            enable_thermal_model=enable_thermal_model,
+            insulation_class=insulation_class,
+            thermal_ambient=thermal_ambient,
+            cooling_type=cooling_type,
             verbose=gd_verbose,
             initial_genes=ind.genes.clone(),
             **gd_kwargs

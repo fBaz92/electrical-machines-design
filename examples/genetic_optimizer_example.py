@@ -150,6 +150,37 @@ def plot_slip_metrics(perfs, rated_torque: float):
     plt.show()
 
 
+def plot_fitness_evolution(history):
+    """Plot best/average/worst fitness over generations."""
+    if not history:
+        print("No GA history recorded.")
+        return
+    
+    generations = [entry['generation'] for entry in history]
+    best = [entry['best_fitness'] for entry in history]
+    avg = [entry['avg_fitness'] for entry in history]
+    worst = [entry.get('worst_fitness', entry['best_fitness']) for entry in history]
+    
+    fig, axes = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+    
+    axes[0].plot(generations, best, label="Best", color="tab:green")
+    axes[0].plot(generations, avg, label="Average", color="tab:blue")
+    axes[0].plot(generations, worst, label="Worst", color="tab:red")
+    axes[0].set_ylabel("Fitness")
+    axes[0].set_title("Fitness Evolution")
+    axes[0].grid(True, linestyle="--", linewidth=0.5, alpha=0.7)
+    axes[0].legend()
+    
+    spread = [worst[i] - best[i] for i in range(len(best))]
+    axes[1].plot(generations, spread, label="Spread (worst-best)", color="tab:purple")
+    axes[1].set_xlabel("Generation")
+    axes[1].set_ylabel("Fitness Spread")
+    axes[1].grid(True, linestyle="--", linewidth=0.5, alpha=0.7)
+    axes[1].legend()
+    
+    fig.tight_layout()
+    plt.show()
+
 def main() -> None:
     _print_section("RUN GENETIC OPTIMIZATION")
     best, optimizer = optimize_motor_genetic(
@@ -180,8 +211,7 @@ def main() -> None:
                 f"avg={entry['avg_fitness']:.3f} "
                 f"max_error={entry['best_max_error']:.2%}"
             )
-    else:
-        print("No history recorded (optimizer stopped immediately).")
+        plot_fitness_evolution(optimizer.history)
     
     _print_section("PERFORMANCE vs SLIP")
     summarize_requested_slips(best, optimizer)

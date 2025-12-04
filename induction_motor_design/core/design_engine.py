@@ -49,6 +49,12 @@ from .convergence import (
     DesignIteration, DesignHistory
 )
 from ..utils.constants import DesignRanges, EMF_FACTOR_TYPICAL, MU_0
+from .thermal_model import (
+    MotorLosses,
+    evaluate_design_thermal_performance,
+    ThermalModelResult,
+    InsulationClass
+)
 
 
 @dataclass
@@ -74,6 +80,12 @@ class DesignInputs:
     J_target: float = DesignRanges.J_TYPICAL
     fill_factor: float = DesignRanges.FILL_FACTOR_TYPICAL
     short_pitch_slots: int = 1  # Slots of coil shortening
+    
+    # Thermal model options
+    enable_thermal_model: bool = False
+    insulation_class: InsulationClass = InsulationClass.F
+    thermal_ambient: float = 40.0
+    cooling_type: str = "TEFC"
 
 
 @dataclass
@@ -102,6 +114,9 @@ class DesignOutputs:
     iterations: int
     converged: bool
     history: DesignHistory
+    
+    # Thermal analysis (optional)
+    thermal_result: Optional[ThermalModelResult] = None
 
 
 class InductionMotorDesigner:
@@ -693,6 +708,37 @@ class InductionMotorDesigner:
         self._log(f"  Mechanical: {final.P_mech:.1f} W")
         self._log(f"  Total: {losses.total:.1f} W")
         
+        thermal_result = None
+        if self.inputs.enable_thermal_model:
+            motor_losses = MotorLosses(
+                P_cu_stator=final.P_cu_stator,
+                P_cu_rotor=final.P_cu_rotor,
+                P_iron=final.P_iron,
+                P_mechanical=final.P_mech
+            )
+            rpm = self.nameplate.rpm_sync * (1 - final.slip)
+            thermal_result = evaluate_design_thermal_performance(
+                lamination=self.lamination,
+                winding=self.winding,
+                stator_conductor=self.inputs.stator_conductor,
+                rotor_conductor=self.inputs.rotor_conductor,
+                steel=self.inputs.steel,
+                losses=motor_losses,
+                rpm=rpm,
+                insulation_class=self.inputs.insulation_class,
+                ambient_temp=self.inputs.thermal_ambient,
+                cooling_type=self.inputs.cooling_type
+            )
+            self._log(f"\nThermal:")
+            self._log(
+                f"  Winding temperature: {thermal_result.T_winding:.1f} °C "
+                f"(limit {thermal_result.insulation_class.max_temp:.0f} °C)"
+            )
+            self._log(
+                f"  Frame temperature: {thermal_result.T_frame:.1f} °C, "
+                f"margin: {thermal_result.temperature_margin:.1f} K"
+            )
+        
         return DesignOutputs(
             lamination=self.lamination,
             winding=self.winding,
@@ -703,7 +749,8 @@ class InductionMotorDesigner:
             losses=losses,
             iterations=self.history.count,
             converged=converged,
-            history=self.history
+            history=self.history,
+            thermal_result=thermal_result
         )
 
 
